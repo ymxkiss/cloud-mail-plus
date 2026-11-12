@@ -1,11 +1,10 @@
 <template>
   <div id="login-box" :style=" background ? 'background: var(--el-bg-color)' : ''" v-loading="oauthLoading" element-loading-text="登录中...">
-    <div id="background-wrap" v-if="!settingStore.settings.background">
-      <div class="x1 cloud"></div>
-      <div class="x2 cloud"></div>
-      <div class="x3 cloud"></div>
-      <div class="x4 cloud"></div>
-      <div class="x5 cloud"></div>
+    <div class="starfield" v-if="!settingStore.settings.background" aria-hidden="true">
+      <canvas ref="starCanvas" class="star-canvas"></canvas>
+      <div class="nebula nebula-1"></div>
+      <div class="nebula nebula-2"></div>
+      <div class="star-grid"></div>
     </div>
     <div v-else :style="background"></div>
     <div class="form-wrapper">
@@ -148,7 +147,7 @@
 
 <script setup>
 import router from "@/router";
-import {computed, nextTick, reactive, ref} from "vue";
+import {computed, nextTick, onMounted, onUnmounted, reactive, ref} from "vue";
 import {login} from "@/request/login.js";
 import {register} from "@/request/login.js";
 import {isEmail} from "@/utils/verify-utils.js";
@@ -202,6 +201,103 @@ let turnstileId = null
 let botJsError = ref(false)
 let verifyErrorCount = 0
 
+// ---- 科幻星空：Canvas 星星 + 流星，纯前端、无依赖 ----
+// 注意：Turnstile 仍由 index.html 的 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js">
+// 全局加载（window.turnstile），这里不 import 任何本地 turnstile 文件，避免构建报 ENOENT。
+const starCanvas = ref(null)
+let starRaf = 0
+let starList = []
+let meteorList = []
+let starCtx = null
+let starResize = null
+
+onUnmounted(() => {
+  cancelAnimationFrame(starRaf)
+  if (starResize) window.removeEventListener('resize', starResize)
+})
+
+function initStarfield() {
+  const canvas = starCanvas.value
+  if (!canvas) return
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const dpr = Math.min(window.devicePixelRatio || 1, 2)
+  const resize = () => {
+    const w = canvas.clientWidth || window.innerWidth
+    const h = canvas.clientHeight || window.innerHeight
+    canvas.width = Math.floor(w * dpr)
+    canvas.height = Math.floor(h * dpr)
+    starCtx = canvas.getContext('2d')
+    starCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    const count = Math.min(220, Math.max(90, Math.floor((w * h) / 9000)))
+    const colors = ['#ffffff', '#a5d8ff', '#c4b5fd', '#7dd3fc', '#bae6fd']
+    starList = Array.from({length: count}, () => ({
+      x: Math.random() * w,
+      y: Math.random() * h,
+      r: 0.4 + Math.random() * 1.4,
+      baseAlpha: 0.35 + Math.random() * 0.65,
+      speed: 0.4 + Math.random() * 1.2,
+      phase: Math.random() * Math.PI * 2,
+      vx: (Math.random() - 0.5) * 0.05,
+      vy: 0.02 + Math.random() * 0.06,
+      color: colors[Math.floor(Math.random() * colors.length)],
+    }))
+    if (reduceMotion) drawStars(0, w, h)
+  }
+  const drawStars = (t, w, h) => {
+    if (!starCtx) return
+    starCtx.clearRect(0, 0, w, h)
+    for (const st of starList) {
+      st.x += st.vx
+      st.y += st.vy
+      if (st.y > h + 2) { st.y = -2; st.x = Math.random() * w }
+      if (st.x < -2) st.x = w + 2
+      if (st.x > w + 2) st.x = -2
+      const alpha = st.baseAlpha * (0.55 + 0.45 * Math.sin(t * 0.001 * st.speed + st.phase))
+      starCtx.globalAlpha = Math.max(0.08, alpha)
+      starCtx.fillStyle = st.color
+      starCtx.beginPath()
+      starCtx.arc(st.x, st.y, st.r, 0, Math.PI * 2)
+      starCtx.fill()
+      // 亮星加十字光晕
+      if (st.r > 1.4) {
+        starCtx.globalAlpha = alpha * 0.35
+        starCtx.fillRect(st.x - st.r * 3, st.y - 0.5, st.r * 6, 1)
+        starCtx.fillRect(st.x - 0.5, st.y - st.r * 3, 1, st.r * 6)
+      }
+    }
+    starCtx.globalAlpha = 1
+    // 流星：每帧小概率生成，最多同时 2 颗
+    if (!reduceMotion && Math.random() < 0.003 && meteorList.length < 2 && w > 500) {
+      meteorList.push({x: w * (0.3 + Math.random() * 0.7), y: h * Math.random() * 0.25, vx: -(5 + Math.random() * 3), vy: 2.5 + Math.random() * 1.5, life: 1})
+    }
+    meteorList = meteorList.filter(m => m.life > 0)
+    for (const m of meteorList) {
+      m.x += m.vx; m.y += m.vy; m.life -= 0.016
+      const grad = starCtx.createLinearGradient(m.x, m.y, m.x - m.vx * 12, m.y - m.vy * 12)
+      grad.addColorStop(0, `rgba(165, 216, 255, ${0.9 * m.life})`)
+      grad.addColorStop(1, 'rgba(165, 216, 255, 0)')
+      starCtx.strokeStyle = grad
+      starCtx.lineWidth = 1.6
+      starCtx.beginPath()
+      starCtx.moveTo(m.x, m.y)
+      starCtx.lineTo(m.x - m.vx * 12, m.y - m.vy * 12)
+      starCtx.stroke()
+    }
+  }
+  const loop = (t) => {
+    drawStars(t, canvas.clientWidth || window.innerWidth, canvas.clientHeight || window.innerHeight)
+    if (!reduceMotion) starRaf = requestAnimationFrame(loop)
+  }
+  resize()
+  starResize = resize
+  window.addEventListener('resize', resize)
+  if (!reduceMotion) starRaf = requestAnimationFrame(loop)
+}
+
+onMounted(() => {
+  initStarfield()
+})
+
 window.onTurnstileSuccess = (token) => {
   verifyToken = token;
 };
@@ -231,9 +327,11 @@ window.loadBefore = (e) => {
   console.log('loadBefore')
 }
 
-const loginOpacity = computed(() => {
-  const opacity = settingStore.settings.loginOpacity
-  return uiStore.dark ? `rgba(0, 0, 0, ${opacity})` : `rgba(255, 255, 255, ${opacity})`
+// 星空下登录卡用深色玻璃底：alpha 仍沿用后台“登录透明度”，下限 0.55 保证文字可读
+const loginCardBg = computed(() => {
+  const opacity = Number(settingStore.settings.loginOpacity ?? 0.88)
+  const alpha = Math.min(0.96, Math.max(0.55, opacity))
+  return `rgba(8, 14, 32, ${alpha})`
 })
 
 const background = computed(() => {
@@ -567,41 +665,55 @@ function submitRegister() {
 
 .form-wrapper {
   position: fixed;
-  right: 0;
-  height: 100%;
+  inset: 0;
   z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
-  @media (max-width: 767px) {
-    width: 100%;
-  }
+  padding: 20px;
+  pointer-events: none;
 }
 
 .container {
-  background: v-bind(loginOpacity);
-  padding-left: 40px;
-  padding-right: 40px;
+  background: v-bind(loginCardBg);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  padding: 36px 40px;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  width: 450px;
-  height: 100%;
-  border-left: 1px solid var(--login-border);
-  box-shadow: var(--el-box-shadow-light);
+  width: min(420px, 100%);
+  height: auto;
+  pointer-events: auto;
+  color: #eaf2ff;
+  border: 1px solid rgba(125, 180, 255, 0.28);
+  border-radius: 20px;
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 0 44px rgba(56, 130, 246, 0.18);
+  /* 小幅浮动：上下 8px，6 秒一圈，慢而稳 */
+  animation: login-float 6s ease-in-out infinite;
+  will-change: transform;
+  position: relative;
+  overflow: hidden;
   @media (max-width: 1024px) {
-    padding: 20px 18px;
-    width: 384px;
-    margin-left: 18px;
+    padding: 32px 28px;
   }
   @media (max-width: 767px) {
-    border: 1px solid var(--login-border);
-    padding: 20px 18px;
-    border-radius: 6px;
-    height: fit-content;
-    width: 100%;
-    margin-right: 18px;
-    margin-left: 18px;
+    padding: 28px 20px;
+    border-radius: 16px;
+  }
+  /* 顶部一条科幻辉光线 */
+  &::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 12%;
+    right: 12%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #38bdf8, #a78bfa, transparent);
+    opacity: 0.9;
   }
 
   .btn {
@@ -613,20 +725,27 @@ function submitRegister() {
   .form-desc {
     margin-top: 5px;
     margin-bottom: 18px;
-    color: var(--form-desc-color);
+    color: rgba(180, 200, 235, 0.85);
   }
 
   .form-title {
     font-weight: bold;
     font-size: 22px !important;
+    color: #ffffff;
+    /* 科幻渐变标题字 */
+    background: linear-gradient(90deg, #7dd3fc, #a78bfa 55%, #67e8f9);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
   }
 
   .switch {
     margin-top: 20px;
     text-align: center;
+    color: rgba(180, 200, 235, 0.85);
 
     span {
-      color: var(--login-switch-color);
+      color: #7dd3fc;
       cursor: pointer;
     }
   }
@@ -684,7 +803,8 @@ function submitRegister() {
   justify-content: center;
   align-items: center;
   border-radius: 50%;
-  background: var(--el-bg-color);
+  background: rgba(8, 14, 32, 0.65);
+  backdrop-filter: blur(8px);
   bottom: 10px;
   right: 10px;
   z-index: 1000;
@@ -728,7 +848,12 @@ function submitRegister() {
 
 
 #login-box {
-  background: linear-gradient(to bottom, #2980b9, #6dd5fa, #fff);
+  position: relative;
+  background:
+    radial-gradient(ellipse 80% 55% at 18% 8%, rgba(99, 102, 241, 0.32), transparent 60%),
+    radial-gradient(ellipse 70% 50% at 85% 90%, rgba(56, 189, 248, 0.20), transparent 60%),
+    radial-gradient(ellipse 55% 40% at 78% 12%, rgba(168, 85, 247, 0.16), transparent 65%),
+    linear-gradient(180deg, #020617 0%, #070d24 45%, #0d1030 78%, #120a2e 100%);
   font: 100% Arial, sans-serif;
   height: 100%;
   margin: 0;
@@ -739,77 +864,85 @@ function submitRegister() {
 }
 
 
-#background-wrap {
-  height: 100%;
-  z-index: 0;
-}
-
-@keyframes animateCloud {
-  0% {
-    margin-left: -500px;
-  }
-
-  100% {
-    margin-left: 100%;
-  }
-}
-
-.x1 {
-  animation: animateCloud 30s linear infinite;
-  transform: scale(0.65);
-}
-
-.x2 {
-  animation: animateCloud 15s linear infinite;
-  transform: scale(0.3);
-}
-
-.x3 {
-  animation: animateCloud 25s linear infinite;
-  transform: scale(0.5);
-}
-
-.x4 {
-  animation: animateCloud 13s linear infinite;
-  transform: scale(0.4);
-}
-
-.x5 {
-  animation: animateCloud 20s linear infinite;
-  transform: scale(0.55);
-}
-
-.cloud {
-  background: linear-gradient(to bottom, #fff 5%, #f1f1f1 100%);
-  border-radius: 100px;
-  box-shadow: 0 8px 5px rgba(0, 0, 0, 0.1);
-  height: 120px;
-  width: 350px;
-  position: relative;
-}
-
-.cloud:after,
-.cloud:before {
-  content: "";
+/* ---- 科幻星空层（Canvas 画星星/流星，CSS 做星云和微光） ---- */
+.starfield {
   position: absolute;
-  background: #fff;
-  z-index: -1;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 
-.cloud:after {
-  border-radius: 100px;
-  height: 100px;
-  left: 50px;
-  top: -50px;
-  width: 100px;
+.star-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
-.cloud:before {
-  border-radius: 200px;
-  height: 180px;
-  width: 180px;
-  right: 50px;
-  top: -90px;
+/* 两团缓慢漂移的星云 */
+.nebula {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(70px);
+  opacity: 0.55;
+}
+.nebula-1 {
+  width: 52vw;
+  height: 52vw;
+  left: -12vw;
+  top: -18vw;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.45), transparent 65%);
+  animation: nebula-drift 26s ease-in-out infinite alternate;
+}
+.nebula-2 {
+  width: 44vw;
+  height: 44vw;
+  right: -10vw;
+  bottom: -16vw;
+  background: radial-gradient(circle, rgba(34, 211, 238, 0.35), transparent 65%);
+  animation: nebula-drift 32s ease-in-out infinite alternate-reverse;
+}
+@keyframes nebula-drift {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(4vw, 3vh) scale(1.12); }
+}
+
+/* 细密的 CSS 星点打底（Canvas 未启动时也有星空），带闪烁 */
+.star-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(1px 1px at 12% 22%, rgba(255, 255, 255, 0.9), transparent),
+    radial-gradient(1px 1px at 28% 68%, rgba(165, 216, 255, 0.8), transparent),
+    radial-gradient(1.5px 1.5px at 44% 12%, rgba(255, 255, 255, 0.85), transparent),
+    radial-gradient(1px 1px at 61% 38%, rgba(196, 181, 253, 0.8), transparent),
+    radial-gradient(1px 1px at 73% 82%, rgba(255, 255, 255, 0.8), transparent),
+    radial-gradient(1.5px 1.5px at 86% 18%, rgba(125, 211, 252, 0.85), transparent),
+    radial-gradient(1px 1px at 92% 58%, rgba(255, 255, 255, 0.75), transparent),
+    radial-gradient(1px 1px at 5% 84%, rgba(165, 216, 255, 0.7), transparent);
+  background-size: 640px 640px;
+  animation: star-twinkle 4s ease-in-out infinite alternate;
+}
+@keyframes star-twinkle {
+  from { opacity: 0.45; }
+  to { opacity: 1; }
+}
+
+/* ---- 登录框小幅浮动：上下 8px ---- */
+@keyframes login-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+/* 尊重系统的“减弱动效”设置 */
+@media (prefers-reduced-motion: reduce) {
+  .container,
+  .nebula,
+  .star-grid {
+    animation: none;
+  }
 }
 
 </style>
